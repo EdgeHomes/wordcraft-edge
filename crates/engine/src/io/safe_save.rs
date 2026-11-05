@@ -33,6 +33,19 @@ pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     written.map_err(explain)
 }
 
+/// Publish a fully prepared private sibling by hard link. Existing files, directories and
+/// symlinks all cause failure; a race for the destination cannot replace another writer's file.
+pub(super) fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut temp = Temporary::create(path, true)?;
+    temp.file()?.write_all(bytes)?;
+    temp.file()?.sync_all()?;
+    crate::file_access::check_write(&path.to_string_lossy()).map_err(io::Error::other)?;
+    drop(temp.file.take());
+    fs::hard_link(&temp.path, path)?;
+    // Drop removes only our staging link, leaving the completed destination.
+    Ok(())
+}
+
 /// A folder that keeps no Unix modes refuses to set one with "Operation not supported": a NAS
 /// share mounted by GVFS (`smb://` in the Linux file manager) refuses every mode change (#3003).
 /// There is no mode to keep there, so the save goes on; any other failure still stops it.

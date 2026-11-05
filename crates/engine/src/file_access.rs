@@ -40,6 +40,7 @@ pub enum Access {
 pub struct AutomationRoots {
     read: Option<Root>,
     write: Option<Root>,
+    base: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -73,7 +74,25 @@ impl AutomationRoots {
         }
         let read = read.map(|p| Root::open(p, Access::Read)).transpose()?;
         let write = write.map(|p| Root::open(p, Access::Write)).transpose()?;
-        Ok(Some(Arc::new(Self { read, write })))
+        Ok(Some(Arc::new(Self { read, write, base: None })))
+    }
+
+    /// One existing folder for relative paths and read/write confinement. Rooted saves never replace files.
+    pub fn rooted(path: &Path) -> Result<Arc<Self>, String> {
+        let read = Root::open(path, Access::Read).map_err(|e| format!("--root: {e}"))?;
+        let write = Root::open(path, Access::Write)?;
+        let base = Some(read.shown.clone());
+        Ok(Arc::new(Self { read: Some(read), write: Some(write), base }))
+    }
+
+    fn path(&self, path: &str) -> Result<PathBuf, String> {
+        if let Some(base) = &self.base {
+            if path.is_empty() || Path::new(path).components().any(|c| matches!(c, Component::ParentDir)) {
+                return Err(format!("--root rejects empty paths and parent traversal: {path}"));
+            }
+            return Ok(base.join(path));
+        }
+        Ok(PathBuf::from(path))
     }
 
     /// The read root, absolute with its links followed.
@@ -88,6 +107,8 @@ impl AutomationRoots {
 
     /// May the file or folder at `path` be read (or written)? `Err` says why not.
     pub fn check(&self, path: &str, access: Access) -> Result<(), String> {
+        let target = self.path(path)?;
+        let path = target.to_str().ok_or("path must be Unicode")?;
         let root = match access {
             Access::Read => self.read.as_ref(),
             Access::Write => self.write.as_ref(),
@@ -198,6 +219,21 @@ pub fn check_read(path: &str) -> Result<(), String> {
 /// May `path` be written here? Always, without roots in force.
 pub fn check_write(path: &str) -> Result<(), String> {
     current().map_or(Ok(()), |r| r.check(path, Access::Write))
+}
+
+/// Resolve relative paths at the I/O boundary, preserving the original read/write checks.
+pub fn checked_path(path: &str, access: Access) -> Result<PathBuf, String> {
+    match current() {
+        Some(roots) => {
+            roots.check(path, access)?;
+            roots.path(path)
+        }
+        None => Ok(PathBuf::from(path)),
+    }
+}
+
+pub fn rooted() -> bool {
+    current().is_some_and(|r| r.base.is_some())
 }
 
 /// `path` made absolute with its links followed; for a path that doesn't exist (yet), its nearest

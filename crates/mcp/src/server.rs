@@ -18,14 +18,8 @@ const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 const RESOURCE_NOT_FOUND: i64 = -32002;
 
-const INSTRUCTIONS: &str = "WordCraft is a word processor (a Microsoft Word clone). Every action is a command: find ids and \
-parameters with list_commands and run them with execute (or several with batch). Positions are \
-{story:\"body\", path:[block,(row,cell,block)...], off:byteOffset}. Typical flow: new_document → type_text \
-\"Hello\" → execute text.newParagraph → execute para.style {style:\"Heading 1\"} → select_text {text:\"Hello\"} → \
-execute format.bold → inspect_document to verify → render_page to look at the result → save {path:\"out.docx\"}. \
-Several documents can be open: new_document and open_document open another one and make it active; \
-list_documents gives their ids, and `doc` on execute, batch and the other document tools works on one \
-without switching.";
+pub const WORKFLOW: &str = "WordCraft makes and edits documents. To make a new document, call doc_create. When the user attaches a document, its absolute path is provided in context: open that exact path with WordCraft, inspect and edit it, save under a new name, then call file_attach so the user can download it. Never write Python or other code to create, read or edit a document. To give the user any file a tool wrote, call file_attach with its path.";
+const INSTRUCTIONS: &str = "Use inspect_document and get_text to inspect the opened structure. Select text and type_text to replace it; execute and batch reach formatting, tables, find/replace and review commands. list_commands discovers command parameters. Check import warnings: modeled formatting is preserved, but unsupported DOCX content may change or be lost. Rooted saves always publish a new file, preserving uploads. tool_search discovers other tools; tool_call returns their exact content, including files. Tools accept doc to address an open document without switching it.";
 
 /// Resource URIs.
 pub const DOC_URI: &str = "wordcraft://document";
@@ -78,6 +72,8 @@ pub(crate) fn read_bounded_line(reader: &mut impl BufRead, max: usize) -> std::i
 pub struct Server {
     backend: Box<dyn Backend>,
     initialized: bool,
+    compact: bool,
+    roots: Option<std::sync::Arc<wordcraft_engine::file_access::AutomationRoots>>,
 }
 
 fn response(id: Value, result: Value) -> Value {
@@ -90,7 +86,20 @@ fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
 
 impl Server {
     pub fn new(backend: Box<dyn Backend>) -> Self {
-        Self { backend, initialized: false }
+        Self { backend, initialized: false, compact: false, roots: None }
+    }
+
+    pub fn with_compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
+        self
+    }
+
+    pub fn with_root(mut self, root: &std::path::Path) -> Result<Self, String> {
+        if self.backend.has_ui() {
+            return Err("--root requires headless mode; remote confinement cannot be enforced".into());
+        }
+        self.roots = Some(wordcraft_engine::file_access::AutomationRoots::rooted(root)?);
+        Ok(self)
     }
 
     pub fn backend(&mut self) -> &mut dyn Backend {
@@ -176,6 +185,11 @@ impl Server {
     }
 
     fn request(&mut self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
+        let roots = self.roots.clone();
+        wordcraft_engine::file_access::confine(roots.as_ref(), || self.request_confined(method, params))
+    }
+
+    fn request_confined(&mut self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
         match method {
             "initialize" => {
                 let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION);
@@ -185,17 +199,18 @@ impl Server {
                     "capabilities": {"tools": {}, "resources": {}},
                     "serverInfo": {"name": "wordcraft", "title": "WordCraft", "version": env!("CARGO_PKG_VERSION"), "websiteUrl": "https://getartcraft.com/apps/wordcraft"},
                     "instructions": format!(
-                        "{INSTRUCTIONS} Backend: {}. Community: https://discord.gg/artcraft · https://getartcraft.com/apps/wordcraft · https://github.com/storytold/wordcraft",
+                        "{WORKFLOW} {INSTRUCTIONS} Backend: {}. Community: https://discord.gg/artcraft · https://getartcraft.com/apps/wordcraft · https://github.com/storytold/wordcraft",
                         self.backend.describe()
                     ),
                 }))
             }
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": tool_definitions()})),
+            "tools/list" => Ok(json!({"tools": if self.compact { Value::Array(crate::compact::definitions()) } else { tool_definitions() }})),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing tool `name`".to_string()))?;
                 let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-                Ok(call_tool(self.backend.as_mut(), name, &args).to_value())
+                let roots = self.roots.clone();
+                Ok(wordcraft_engine::file_access::confine(roots.as_ref(), || call_tool(self.backend.as_mut(), name, &args).to_value()))
             }
             "resources/list" => Ok(json!({"resources": [
                 {"uri": DOC_URI, "name": "document", "title": "Active document", "description": "Blocks, text, formatting, sections, parts and selection of the document (document.inspect)", "mimeType": "application/json"},

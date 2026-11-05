@@ -42,6 +42,17 @@ thread_local! {
     static REPORTED: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
+/// Limits the text-format importer reported on this thread's most recent import.
+pub fn import_warnings() -> Vec<String> {
+    use Dropped::*;
+    let bits = REPORTED.with(|r| r.get());
+    [Font, Link, RunStrings, StyleName, Spaces, TableCells]
+        .into_iter()
+        .filter(|kind| bits & (1u8 << (*kind as u8)) != 0)
+        .map(Dropped::message)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

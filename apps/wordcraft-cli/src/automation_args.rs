@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 
 pub struct AutomationArgs {
+    pub root: Option<PathBuf>,
+    root_given: bool,
     pub read_root: Option<PathBuf>,
     pub write_root: Option<PathBuf>,
     read_given: bool,
@@ -12,14 +14,20 @@ pub struct AutomationArgs {
 
 impl AutomationArgs {
     pub fn new(read_root: Option<PathBuf>, write_root: Option<PathBuf>) -> Self {
-        Self { read_root, write_root, read_given: false, write_given: false }
+        Self { root: None, root_given: false, read_root, write_root, read_given: false, write_given: false }
     }
 
     /// Returns whether this argument is a root flag. A second occurrence of a flag is an error,
     /// including when the two spellings (`--flag DIR`, `--flag=DIR`) are mixed.
     pub fn consume(&mut self, arg: &str, args: &mut impl Iterator<Item = String>) -> Result<bool, String> {
         let (flag, inline) = arg.split_once('=').map_or((arg, None), |(flag, value)| (flag, Some(value)));
+        if (flag == "--root" && (self.read_given || self.write_given))
+            || (self.root_given && matches!(flag, "--automation-read-root" | "--automation-write-root"))
+        {
+            return Err("--root cannot be combined with separate automation roots".into());
+        }
         let (root, given) = match flag {
+            "--root" => (&mut self.root, &mut self.root_given),
             "--automation-read-root" => (&mut self.read_root, &mut self.read_given),
             "--automation-write-root" => (&mut self.write_root, &mut self.write_given),
             _ => return Ok(false),

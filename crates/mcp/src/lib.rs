@@ -6,6 +6,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod backend;
+pub mod compact;
+pub mod delivery;
 pub mod server;
 pub mod tools;
 
@@ -68,6 +70,7 @@ pub fn doc_param(params: &Value) -> Result<Option<u64>, String> {
 
 fn answer_on(session: &mut Session, method: &str, params: Value) -> Result<Value, String> {
     match method {
+        "file.attach" => delivery::attach(&params),
         "engine.execute" | "command" => {
             let id = params.get("command").and_then(Value::as_str).ok_or("missing `command`")?.to_string();
             let p = params.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}));

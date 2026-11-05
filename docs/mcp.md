@@ -1,5 +1,7 @@
 # MCP server
 
+> **Last reviewed / updated:** 2026-11-05 · MCP-NPM: compact DOCX creation, upload editing, downloads and rooted npm distribution.
+
 WordCraft speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdio, so
 Claude and other agents can write and edit documents.
 
@@ -17,6 +19,47 @@ loopback addresses; see [Keys](control-protocol.md#keys). The bridge serves even
 isn't open yet: tool calls return "not reachable … will retry on each call" and succeed once the
 app's port opens (#4078), so a client that starts before WordCraft doesn't lose the server for
 its whole session.
+
+## LibreChat and compact document delivery
+
+`wordcraft-cli mcp --compact --root /existing/uploads` exposes 14 core tools plus
+`tool_search` and `tool_call`. Both document workflows work using the core tools alone:
+
+1. Create: `doc_create {markdown, title?, path?, page_size?, font?, font_size?, margin?}`
+   imports Markdown into real editable document structures, saves an unused DOCX name and
+   returns a JSON summary followed by the embedded DOCX resource.
+2. Edit an upload: `open_document {path: <the exact absolute upload path>}`, inspect the
+   document, select/edit text or run formatting/table/review commands, `save_document` under
+   a new name, then `file_attach {path}` to return the download. The model needs no code.
+
+`file_attach` reads regular DOCX, PPTX, XLSX, PDF and CSV files, at most 32 MiB including the
+actual read. Resource URIs percent-encode the filename. `tool_call` returns the exact direct
+tool result, including resources; recursive meta calls are refused. `wordcraft-cli tools
+--json --compact` prints the advertised catalog without starting the server.
+
+`--root` reuses engine read/write confinement and must exist at startup. Relative paths use
+that root; absolute paths inside it work. Parent traversal and symlink escapes fail. The same
+boundaries cover generic, batch and nested macro commands, linked media, pictures and templates.
+All rooted writes publish complete bytes without replacing existing entries, and default saves
+choose a new DOCX name. A race for a chosen name fails safely. Rooted `--connect` is refused.
+Separate automation read/write roots retain their existing behavior and cannot be combined with
+`--root`. Confinement's existing path-check/open race limitation still applies.
+
+Creation supports the existing Markdown subset, with limits of 512 KiB, 4000 lines/blocks,
+8192 bytes per line, nesting 16, tables 200 rows/16 columns and 4000 cells total. Markdown images
+are rejected; pictures can be inserted afterward through existing commands. Unsupported Markdown
+and importer limits are reported. Output over 32 MiB is rejected before publication.
+
+Uploads keep modeled formatting and structure rather than being regenerated from plain text.
+The open reply warns that unsupported DOCX features may change or be lost. Upstream import
+warnings are logged and are not yet an exhaustive structured feature-loss report. See
+[file-format parity](file-format-parity.md) and inspect/render saved output.
+
+The npm launcher, platform builds, exact LibreChat YAML, required uploads-directory setup,
+manual publish command and deployment handoff are documented in
+[packaging/npm](../packaging/npm/wordcraft-edge-mcp/README.md). Production needs per-user roots;
+a shared development root does not isolate users. [Verification](../packaging/npm/VERIFICATION.md)
+distinguishes local tests from live LibreChat acceptance.
 
 ## Scripts from the command line
 
@@ -276,3 +319,7 @@ the distance from the text). Missing fields are `none`, 0, no colour and 0, so a
 "right"?: pt}`: the alignment and indents as seen on the page, which each selected paragraph turns
 into its own start and end once `props` (a `bidi` in it, say) is applied. The Paragraph dialog sends
 only the fields that changed this way, as one command and so one undo step.
+
+## Revision history
+
+- 2026-11-05 · MCP-NPM: compact discovery, bounded DOCX creation/file resources, rooted save-as and npm/LibreChat handoff; existing stdio and remote modes retained.

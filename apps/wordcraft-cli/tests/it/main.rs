@@ -7,3 +7,5 @@ mod help;
 mod non_utf8_args;
 mod picture_then_typing;
 mod text_tracked;
+
+mod npm_mcp;

@@ -140,6 +140,7 @@ fn take_definitions(lines: &mut Vec<String>) -> Refs {
 
 /// Parse Markdown text into the flow model.
 pub fn parse(text: &str) -> model::Flow {
+    model::begin_import();
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let mut lines: Vec<String> = text.split('\n').map(|l| expand_tabs(l.trim_end_matches('\r'))).collect();
     let refs = take_definitions(&mut lines);

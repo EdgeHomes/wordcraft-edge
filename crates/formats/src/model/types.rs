@@ -64,7 +64,7 @@ pub(crate) enum Dropped {
 }
 
 impl Dropped {
-    fn message(self) -> String {
+    pub(super) fn message(self) -> String {
         match self {
             Dropped::Font => format!("import: font names longer than {MAX_FONT_NAME} bytes are dropped; that text keeps the surrounding font"),
             Dropped::Link => format!("import: links longer than {MAX_LINK} bytes are dropped; their text is kept"),

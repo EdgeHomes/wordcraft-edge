@@ -1,0 +1,26 @@
+{
+  "name": "wordcraft-edge-mcp",
+  "version": "0.0.0",
+  "description": "WordCraft MCP server (stdio): create, edit and download DOCX documents from LibreChat or any MCP client",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mbarker-edgehomes/wordcraft-edge.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "docx",
+    "librechat"
+  ],
+  "bin": {
+    "wordcraft-edge-mcp": "bin/wordcraft-edge-mcp.js"
+  },
+  "files": [
+    "bin",
+    "LICENSE-*"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

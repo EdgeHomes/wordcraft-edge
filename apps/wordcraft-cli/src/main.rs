@@ -43,7 +43,8 @@ USAGE:
                                               documents and with {\"id\": N} makes one active
   wordcraft-cli commands [--json]             list every command
   wordcraft-cli parity [--markdown]           feature-catalog parity
-  wordcraft-cli mcp [--connect HOST:PORT | --author NAME] [--automation-read-root DIR] [--automation-write-root DIR]
+  wordcraft-cli tools [--json] [--compact]     MCP tool catalog for deployment diagnostics
+  wordcraft-cli mcp [--compact] [--root DIR] [--connect HOST:PORT | --author NAME] [--automation-read-root DIR] [--automation-write-root DIR]
                                               MCP server on stdio (headless, or bridged to the app).
                                               --automation-read-root / --automation-write-root confine
                                               the files the agent's commands read (open, insert text
@@ -71,7 +72,7 @@ same output on every machine.
 ";
 
 /// The subcommands, in `USAGE` order; `--help` or `-h` after any of them prints `USAGE` (#968).
-const SUBCOMMANDS: &[&str] = &["convert", "info", "text", "inspect", "render", "run", "commands", "parity", "mcp", "zotero"];
+const SUBCOMMANDS: &[&str] = &["convert", "info", "text", "inspect", "render", "run", "commands", "parity", "tools", "mcp", "zotero"];
 
 fn wants_help(cmd: &str, rest: &[String]) -> bool {
     SUBCOMMANDS.contains(&cmd) && rest.iter().any(|a| a == "--help" || a == "-h")
@@ -286,8 +287,11 @@ fn automation_roots(
             left.push(arg);
         }
     }
-    let roots = wordcraft_engine::file_access::AutomationRoots::new(found.read_root.as_deref(), found.write_root.as_deref())
-        .map_err(|e| format!("{command}: {e}"))?;
+    let roots = match found.root {
+        Some(root) => Some(wordcraft_engine::file_access::AutomationRoots::rooted(&root).map_err(|e| format!("{command}: {e}"))?),
+        None => wordcraft_engine::file_access::AutomationRoots::new(found.read_root.as_deref(), found.write_root.as_deref())
+            .map_err(|e| format!("{command}: {e}"))?,
+    };
     Ok((roots, left))
 }
 
@@ -323,7 +327,11 @@ const RUN_OPTIONS: &[OptionSpec] = &[
 ];
 const COMMANDS_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--json", takes_value: false }];
 const PARITY_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--markdown", takes_value: false }];
-const MCP_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--connect", takes_value: true }, OptionSpec { name: "--author", takes_value: true }];
+const MCP_OPTIONS: &[OptionSpec] = &[
+    OptionSpec { name: "--compact", takes_value: false },
+    OptionSpec { name: "--connect", takes_value: true },
+    OptionSpec { name: "--author", takes_value: true },
+];
 const ZOTERO_OPTIONS: &[OptionSpec] = &[
     OptionSpec { name: "--cmd", takes_value: true },
     OptionSpec { name: "--save", takes_value: true },
@@ -412,8 +420,27 @@ fn run_source_paths(rest: &[String], script: Option<&script::Script>) -> (Option
     (from_file, from_template)
 }
 
-/// Run the subcommand named by `args` (the command line after the program name). Files named
-/// there are opened by their real names, which may not be valid Unicode.
+/// Print the MCP tool catalog without starting a server.
+fn tools_catalog(rest: &[String]) -> Result<(), Failure> {
+    validate_options("tools", rest, &[OptionSpec { name: "--json", takes_value: false }, OptionSpec { name: "--compact", takes_value: false }])?;
+    let tools = if rest.iter().any(|a| a == "--compact") {
+        serde_json::Value::Array(wordcraft_mcp::compact::definitions())
+    } else {
+        wordcraft_mcp::tools::tool_definitions()
+    };
+    write_stdout(|o| {
+        if rest.iter().any(|a| a == "--json") {
+            writeln!(o, "{}", tools)?;
+        } else if let Some(tools) = tools.as_array() {
+            for tool in tools {
+                writeln!(o, "{:<24} {}", tool["name"].as_str().unwrap_or_default(), tool["description"].as_str().unwrap_or_default())?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Run a CLI subcommand, retaining non-Unicode file operands.
 fn run<S: AsRef<OsStr>>(args: &[S]) -> Result<(), Failure> {
     let script_path = script_operand(args);
     let (args, file) = text_args(args)?;
@@ -595,6 +622,7 @@ fn run<S: AsRef<OsStr>>(args: &[S]) -> Result<(), Failure> {
                 write_stdout(|o| writeln!(o, "{}", serde_json::to_string_pretty(&p).unwrap_or_default()))
             }
         }
+        "tools" => tools_catalog(&rest),
         "mcp" => {
             let (roots, rest) = automation_roots("mcp", &rest)?;
             validate_options("mcp", &rest, MCP_OPTIONS)?;
@@ -602,7 +630,7 @@ fn run<S: AsRef<OsStr>>(args: &[S]) -> Result<(), Failure> {
             let connect = arg_value(&rest, "--connect");
             if roots.is_some() && connect.is_some() {
                 return Err(
-                    "mcp: --automation-read-root and --automation-write-root confine the headless server; a running app is not confined by them"
+                    "mcp: --root / --automation-read-root / --automation-write-root require headless mode; remote confinement cannot be enforced"
                         .into(),
                 );
             }
@@ -649,7 +677,7 @@ fn run<S: AsRef<OsStr>>(args: &[S]) -> Result<(), Failure> {
                     Box::new(headless)
                 }
             };
-            let mut server = wordcraft_mcp::Server::new(backend);
+            let mut server = wordcraft_mcp::Server::new(backend).with_compact(rest.iter().any(|a| a == "--compact"));
             let stdin = std::io::stdin();
             // A client that closes our stdout has hung up: `serve` returns BrokenPipe and we end cleanly.
             Ok(server.serve(stdin.lock(), std::io::stdout())?)

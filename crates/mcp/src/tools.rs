@@ -66,6 +66,26 @@ fn tool(name: &str, title: &str, desc: &str, schema: Value, ro: bool) -> Value {
 pub fn tool_definitions() -> Value {
     json!([
         tool(
+            "doc_create",
+            "Create DOCX",
+            &format!(
+                "{} Create a styled, editable DOCX from Markdown and return its download in one call. Limits: 512 KiB Markdown, 4000 blocks/cells, tables 200 rows/16 columns, no images, 32 MiB output. Page size letter or a4; margin in points (36..108), font and font_size (9..16). Never overwrites.",
+                crate::server::WORKFLOW
+            ),
+            obj(
+                json!({"markdown":s("Markdown content"), "title":s("Optional document title"), "path":s("Optional output .docx path; default Document.docx"), "page_size":{"type":"string","enum":["letter","a4"]}, "font":s("Font family"), "font_size":n("Body size in points (9..16)"), "margin":n("Margins in points (36..108)")}),
+                &["markdown"]
+            ),
+            false
+        ),
+        tool(
+            "file_attach",
+            "Attach file",
+            "Return a regular file as downloadable MCP resource content; supports DOCX, PPTX, XLSX, PDF and CSV, at most 32 MiB. Call after saving an edited document.",
+            obj(json!({"path":s("Exact file path inside the root")}), &["path"]),
+            true
+        ),
+        tool(
             "list_commands",
             "List commands",
             "Every WordCraft command: id, label, ribbon location, shortcut and params. Filter with `query`.",
@@ -99,7 +119,10 @@ pub fn tool_definitions() -> Value {
         tool(
             "open_document",
             "Open",
-            "Open a .docx, .doc, .odt, .rtf, .md, .tex, .html, .txt or .json file, or any other text file (.m3u, .log, .ini…) as plain text. Give `password` for a protected file; without it the call fails asking for one. The file opens beside the documents already open (it replaces a blank one nobody has used) and becomes the active one; a file that is already open becomes active again (`alreadyOpen`). The reply's `id` addresses it (`doc`).",
+            &format!(
+                "{} Open a .docx, .doc, .odt, .rtf, .md, .tex, .html, .txt or .json file, or any other text file (.m3u, .log, .ini…) as plain text. Give `password` for a protected file; without it the call fails asking for one. The file opens beside the documents already open (it replaces a blank one nobody has used) and becomes the active one; a file that is already open becomes active again (`alreadyOpen`). The reply's `id` addresses it (`doc`).",
+                crate::server::WORKFLOW
+            ),
             obj(json!({"path": s("File path"), "password": s("Password, if the file is protected")}), &["path"]),
             false
         ),
@@ -107,7 +130,7 @@ pub fn tool_definitions() -> Value {
             "save_document",
             "Save",
             "Save (format from the extension: docx, pdf, odt, rtf, html, md, tex, txt, png).",
-            with_doc(obj(json!({"path": s("File path; omit to save in place")}), &[])),
+            with_doc(obj(json!({"path": s("File path; rooted mode chooses a new DOCX name when omitted and never overwrites")}), &[])),
             false
         ),
         tool(
@@ -209,12 +232,95 @@ fn wrap(r: Result<Value, String>) -> ToolResult {
     }
 }
 
+fn embedded(r: Result<Value, String>) -> ToolResult {
+    match r {
+        Ok(v) => match v.get("content").and_then(Value::as_array) {
+            Some(content) => ToolResult { content: content.clone(), is_error: false },
+            None => ToolResult::error("backend returned no embedded file"),
+        },
+        Err(e) => ToolResult::error(e),
+    }
+}
+
+/// Validate the advertised primitive types for every entry point, including meta dispatch.
+pub fn check_arguments(name: &str, args: &Value) -> Result<(), String> {
+    let defs = tool_definitions();
+    let def = defs.as_array().and_then(|ts| ts.iter().find(|t| t["name"] == name)).ok_or_else(|| format!("unknown tool `{name}`"))?;
+    let empty = serde_json::Map::new();
+    let obj = if args.is_null() { &empty } else { args.as_object().ok_or("tool arguments must be an object")? };
+    if let Some(req) = def["inputSchema"]["required"].as_array() {
+        for key in req.iter().filter_map(Value::as_str) {
+            if !obj.contains_key(key) {
+                return Err(format!("missing `{key}`"));
+            }
+        }
+    }
+    if let Some(props) = def["inputSchema"]["properties"].as_object() {
+        for (key, val) in obj {
+            let Some(schema) = props.get(key) else {
+                if matches!(name, "doc_create" | "file_attach") {
+                    return Err(format!("unknown argument `{key}`"));
+                }
+                continue; // Existing convenience tools historically ignore extra parameters.
+            };
+            if val.is_null() && !matches!(name, "doc_create" | "file_attach") {
+                continue;
+            }
+            let valid = match schema["type"].as_str() {
+                Some("string") => val.is_string(),
+                Some("boolean") => val.is_boolean(),
+                Some("number") => val.is_number(),
+                Some("integer") => val.as_u64().is_some(),
+                Some("array") => val.is_array(),
+                Some("object") => val.is_object(),
+                _ => true,
+            };
+            if !valid {
+                return Err(format!("invalid type for `{key}`"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Run tool `name` with arguments `a` through backend `b` (`tools/call`); unknown tools and
 /// failed calls are error results, never panics.
 pub fn call_tool(b: &mut dyn Backend, name: &str, a: &Value) -> ToolResult {
+    if name == "tool_call" {
+        if !a.is_object() || a.as_object().is_some_and(|o| o.keys().any(|k| k != "name" && k != "arguments")) {
+            return ToolResult::error("tool_call accepts only name and arguments");
+        }
+        let Some(target) = a.get("name").and_then(Value::as_str) else {
+            return ToolResult::error("tool_call needs string name");
+        };
+        if matches!(target, "tool_call" | "tool_search") {
+            return ToolResult::error("recursive meta calls are forbidden");
+        }
+        return call_tool(b, target, a.get("arguments").unwrap_or(&json!({})));
+    }
+    if name == "tool_search" {
+        return wrap(crate::compact::search(a));
+    }
+    if let Err(e) = check_arguments(name, a) {
+        return ToolResult::error(e);
+    }
     let st = |k: &str| a.get(k).and_then(Value::as_str);
     let doc = a.get("doc").filter(|d| !d.is_null());
     match name {
+        "doc_create" => match exec(b, "document.create", a.clone(), None) {
+            Ok(summary) => match summary.get("path").and_then(Value::as_str) {
+                Some(path) => {
+                    let mut result = embedded(b.call("file.attach", json!({"path":path})));
+                    if !result.is_error {
+                        result.content.splice(..1, ToolResult::json(&summary).content);
+                    }
+                    result
+                }
+                None => ToolResult::error("creation returned no output path"),
+            },
+            Err(e) => ToolResult::error(e),
+        },
+        "file_attach" => embedded(b.call("file.attach", a.clone())),
         "list_commands" => {
             let q = st("query").unwrap_or("").to_lowercase();
             match b.call("engine.commands", json!({})) {

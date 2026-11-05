@@ -109,7 +109,8 @@ pub fn wrong_password(err: &str) -> bool {
 /// can't be read: opening it says why.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn is_empty_file(path: &std::path::Path) -> bool {
-    crate::file_access::check_read(&path.to_string_lossy()).is_ok() && std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == 0)
+    crate::file_access::checked_path(&path.to_string_lossy(), crate::file_access::Access::Read)
+        .is_ok_and(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() == 0))
 }
 
 /// [`is_empty_file`]: on the web files come through the browser, never by path.
@@ -122,7 +123,8 @@ pub fn is_empty_file(_path: &std::path::Path) -> bool {
 /// spellings name one file; `None` when it can't be resolved or is outside the readable roots.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn canonical(path: &std::path::Path) -> Option<std::path::PathBuf> {
-    crate::file_access::check_read(&path.to_string_lossy()).ok()?;
+    let checked = crate::file_access::checked_path(&path.to_string_lossy(), crate::file_access::Access::Read).ok()?;
+    let path = checked.as_path();
     std::fs::canonicalize(path).ok()
 }
 
@@ -483,6 +485,8 @@ pub fn open_path_with(path: &std::path::Path, password: Option<&str>) -> Result<
 /// [`open_path_with`] in `region` (see [`open_bytes_in`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_path_in(path: &std::path::Path, password: Option<&str>, region: &wordcraft_geom::Region) -> Result<(Document, bool), String> {
+    let checked = crate::file_access::checked_path(&path.to_string_lossy(), crate::file_access::Access::Read)?;
+    let path = checked.as_path();
     let bytes = read_document(path)?;
     let name = path.to_string_lossy();
     if matches!(ext_of(&name).as_str(), "html" | "htm" | "xhtml") {
@@ -507,7 +511,8 @@ const MAX_DOCUMENT: u64 = 2 << 30;
 /// opens a file whose name isn't valid Unicode through `file.open`'s `data` (#1440).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_document(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    crate::file_access::check_read(&path.to_string_lossy())?;
+    let checked = crate::file_access::checked_path(&path.to_string_lossy(), crate::file_access::Access::Read)?;
+    let path = checked.as_path();
     let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !meta.is_file() {
         return Err(format!("{}: not a file", path.display()));
@@ -605,8 +610,9 @@ impl LocalImages {
         let path = std::fs::canonicalize(dir.join(rel)).ok()?;
         // The folder is the one the HTML path names, which may be a link from outside the
         // automation read root; the picture itself must be inside it (#3736).
-        crate::file_access::check_read(&path.to_string_lossy()).ok()?;
-        path.starts_with(dir).then_some(path)
+        let checked = crate::file_access::checked_path(&path.to_string_lossy(), crate::file_access::Access::Read).ok()?;
+        let path = checked.as_path();
+        path.starts_with(dir).then_some(path.to_path_buf())
     }
 }
 
@@ -649,6 +655,8 @@ pub fn read_regular_file_within(_path: &std::path::Path, _limit: u64) -> Option<
 /// after (the path may have been swapped in between); anything but a regular file is "not a file".
 #[cfg(not(target_arch = "wasm32"))]
 fn open_regular_file(path: &std::path::Path) -> Result<(std::fs::File, std::fs::Metadata), String> {
+    let checked = crate::file_access::checked_path(&path.to_string_lossy(), crate::file_access::Access::Read)?;
+    let path = checked.as_path();
     let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !meta.is_file() {
         return Err(format!("{}: not a file", path.display()));
@@ -699,7 +707,8 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, String> {
 /// and the read stops past `max`, so a file swapped or grown after the check is refused too (#3666).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_file_capped(path: &str, max: u64, what: &str) -> Result<Vec<u8>, String> {
-    crate::file_access::check_read(path)?;
+    let checked = crate::file_access::checked_path(path, crate::file_access::Access::Read)?;
+    let path = checked.to_str().ok_or("path must be Unicode")?;
     let too_large = || format!("{path}: the {what} is larger than {} MB", max >> 20);
     let (file, meta) = open_regular_file(std::path::Path::new(path))?;
     if meta.len() > max {
@@ -712,13 +721,19 @@ pub fn read_file_capped(path: &str, max: u64, what: &str) -> Result<Vec<u8>, Str
     Ok(bytes)
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn read_file_capped(path: &str, _max: u64, _what: &str) -> Result<Vec<u8>, String> {
+    Err(format!("{path}: files are opened through the browser on the web"))
+}
+
 /// The first `max` bytes of the file at `path` (fewer when it is shorter), inside the automation
 /// read root when there is one: enough to tell a file's format by its start. Only a regular file
 /// is opened: a named pipe would block the open until a writer appeared (#3666).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_file_head(path: &str, max: u64) -> Result<Vec<u8>, String> {
     use std::io::Read;
-    crate::file_access::check_read(path)?;
+    let checked = crate::file_access::checked_path(path, crate::file_access::Access::Read)?;
+    let path = checked.to_str().ok_or("path must be Unicode")?;
     let (file, _) = open_regular_file(std::path::Path::new(path))?;
     let mut head = Vec::new();
     file.take(max).read_to_end(&mut head).map_err(|e| format!("{path}: {e}"))?;
@@ -743,7 +758,8 @@ pub struct DirEntry {
 /// looked at, and `true` says the listing was cut short there.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn list_dir(path: &std::path::Path, max: usize) -> Result<(Vec<DirEntry>, bool), String> {
-    crate::file_access::check_read(&path.to_string_lossy())?;
+    let checked = crate::file_access::checked_path(&path.to_string_lossy(), crate::file_access::Access::Read)?;
+    let path = checked.as_path();
     let read = std::fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut out = Vec::new();
     for (seen, entry) in read.enumerate() {
@@ -770,7 +786,8 @@ pub fn list_dir(path: &std::path::Path, max: usize) -> Result<(Vec<DirEntry>, bo
 /// bytes; at most `max_part` bytes of the part are read), inside the automation read root.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn package_title(path: &std::path::Path, max_file: u64, max_part: u64) -> Option<String> {
-    crate::file_access::check_read(&path.to_string_lossy()).ok()?;
+    let checked = crate::file_access::checked_path(&path.to_string_lossy(), crate::file_access::Access::Read).ok()?;
+    let path = checked.as_path();
     let file = std::fs::File::open(path).ok()?;
     if file.metadata().ok()?.len() > max_file {
         return None;
@@ -781,9 +798,11 @@ pub fn package_title(path: &std::path::Path, max_file: u64, max_part: u64) -> Op
 /// Rename without replacing another file, respecting both automation access roots.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn rename_file(source: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
-    crate::file_access::check_read(&source.to_string_lossy())?;
+    let source = crate::file_access::checked_path(&source.to_string_lossy(), crate::file_access::Access::Read)?;
+    let source = source.as_path();
     crate::file_access::check_write(&source.to_string_lossy())?;
-    crate::file_access::check_write(&destination.to_string_lossy())?;
+    let destination = crate::file_access::checked_path(&destination.to_string_lossy(), crate::file_access::Access::Write)?;
+    let destination = destination.as_path();
     // Creating a sibling hard link refuses collisions atomically and keeps the original bytes.
     if let Err(e) = std::fs::hard_link(source, destination) {
         if e.kind() == std::io::ErrorKind::AlreadyExists && only_case_differs(source, destination) {
@@ -815,9 +834,10 @@ fn only_case_differs(source: &std::path::Path, destination: &std::path::Path) ->
 /// Write `bytes` to the file at `path`, inside the automation write root when there is one.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_file(path: &str, bytes: &[u8]) -> Result<(), String> {
-    crate::file_access::check_write(path)?;
+    let checked = crate::file_access::checked_path(path, crate::file_access::Access::Write)?;
+    let path = checked.to_str().ok_or("path must be Unicode")?;
     // Like a document save: the old file is replaced only once the new bytes are fully written.
-    safe_save::write(std::path::Path::new(path), bytes).map_err(|e| format!("{path}: {e}"))
+    publish(std::path::Path::new(path), bytes).map_err(|e| format!("{path}: {e}"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -842,9 +862,10 @@ pub fn save_path(path: &std::path::Path, doc: &Document) -> Result<(), String> {
 /// [`save_path`], encrypted with `password` as [`save_bytes_with`] does.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_path_with(path: &std::path::Path, doc: &Document, password: Option<&str>, opts: &ExportOptions) -> Result<(), String> {
-    crate::file_access::check_write(&path.to_string_lossy())?;
+    let checked = crate::file_access::checked_path(&path.to_string_lossy(), crate::file_access::Access::Write)?;
+    let path = checked.as_path();
     let bytes = save_bytes_with(&path.to_string_lossy(), doc, password, opts)?;
-    safe_save::write(path, &bytes).map_err(|e| format!("{}: {e}", path.display()))
+    publish(path, &bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -857,4 +878,66 @@ pub fn save_path_with(path: &std::path::Path, _doc: &Document, _password: Option
 /// [`wordcraft_formats::txt::decode`]).
 pub fn decode_text(b: &[u8]) -> String {
     wordcraft_formats::txt::decode(b)
+}
+
+/// Largest downloadable result. Checked before rooted publication, including generic commands.
+pub const MAX_DELIVERY: usize = 32 << 20;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn publish(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if crate::file_access::rooted() {
+        if bytes.len() > MAX_DELIVERY {
+            return Err(std::io::Error::other("output exceeds the 32 MiB delivery limit"));
+        }
+        safe_save::write_new(path, bytes)
+    } else {
+        safe_save::write(path, bytes)
+    }
+}
+
+/// Choose an unused name; final publication also refuses collisions atomically.
+pub fn unused_output(path: &str) -> Result<std::path::PathBuf, String> {
+    let path = crate::file_access::checked_path(path, crate::file_access::Access::Write)?;
+    let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+    let dir = path.parent().filter(|p| p.is_dir()).ok_or("output parent must already exist")?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).ok_or("invalid output filename")?;
+    let ext = path.extension().and_then(|s| s.to_str()).ok_or("output needs an extension")?;
+    for i in 1..10_000 {
+        let candidate = if i == 1 { path.clone() } else { dir.join(format!("{stem} ({i}).{ext}")) };
+        if candidate.symlink_metadata().is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+            return Ok(candidate);
+        }
+    }
+    Err("no unused output name available".into())
+}
+
+/// Write completed bytes without replacing an existing directory entry.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_new_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    let path = crate::file_access::checked_path(path, crate::file_access::Access::Write)?;
+    if bytes.len() > MAX_DELIVERY {
+        return Err("output exceeds the 32 MiB delivery limit".into());
+    }
+    safe_save::write_new(&path, bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn write_new_file(_path: &str, _bytes: &[u8]) -> Result<(), String> {
+    Err("files are saved through the browser on the web".into())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod delivery_tests {
+    use super::*;
+    #[test]
+    fn actual_read_is_bounded_when_file_grows_after_metadata() {
+        let p = std::env::temp_dir().join(format!("wc-growing-{}.bin", std::process::id()));
+        std::fs::write(&p, b"a").unwrap();
+        let file = std::fs::File::open(&p).unwrap();
+        let metadata = file.metadata().unwrap();
+        std::fs::write(&p, vec![b'x'; 1024]).unwrap();
+        let bytes = read_bounded(file, &metadata, 8).unwrap();
+        assert_eq!(bytes.len(), 9, "the actual read stops at cap+1, even with stale metadata");
+        std::fs::remove_file(p).unwrap();
+    }
 }
